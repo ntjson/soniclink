@@ -27,6 +27,12 @@ class ModemConfig:
     trailing_silence_ms: float = 250.0
     burst_amplitude: float = 0.7
     fade_duration_ms: float = 5.0
+    bandpass_low_hz: float = 800.0
+    bandpass_high_hz: float = 2600.0
+    preprocess_peak_target: float = 0.95
+    clipping_abs_threshold: float = 0.98
+    clipping_fraction_threshold: float = 0.01
+    weak_symbol_confidence_threshold: float = 0.15
 
     @property
     def sync_word(self) -> int:

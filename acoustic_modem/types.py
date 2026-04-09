@@ -21,6 +21,23 @@ class FrameFields:
     crc: int
 
 
+@dataclass(frozen=True, slots=True)
+class DecodeResult:
+    decoded_text: str | None
+    failure_code: FailureCode | None
+    recovered_length: int | None
+    crc_ok: bool
+    weak_symbol_count: int
+    samples_per_symbol: int
+    clipping_warning: bool
+    sync_found: bool
+    start_sample: int | None
+
+    @property
+    def success(self) -> bool:
+        return self.failure_code is None and self.decoded_text is not None and self.crc_ok
+
+
 class FramingError(ValueError):
     __slots__ = ("code",)
 
