@@ -21,7 +21,7 @@ def to_mono(samples: np.ndarray) -> np.ndarray:
         return sample_array
     if sample_array.ndim == 2:
         return np.mean(sample_array, axis=1)
-    raise ValueError("samples must be mono or stereo")
+    raise ValueError("samples must be one-dimensional or two-dimensional audio")
 
 
 def pcm_to_float(samples: np.ndarray) -> np.ndarray:

@@ -5,15 +5,14 @@ import unittest
 import numpy as np
 
 from acoustic_modem.config import DEFAULT_CONFIG
-from acoustic_modem.framing import build_frame, bytes_to_bits, validate_text
 from acoustic_modem.rx import preprocess_audio
 from acoustic_modem.sync import find_leader_regions, find_sync_candidates, score_sync_candidate
-from acoustic_modem.tx import synthesize_transmission
+from tests.support import transmission
 
 
 class SyncTests(unittest.TestCase):
     def test_leader_scan_finds_candidate_region_in_clean_synthetic_wav(self) -> None:
-        processed = preprocess_audio(_transmission("HELLO"), DEFAULT_CONFIG.sample_rate_hz, DEFAULT_CONFIG)
+        processed = preprocess_audio(transmission("HELLO"), DEFAULT_CONFIG.sample_rate_hz, DEFAULT_CONFIG)
 
         leader_regions = find_leader_regions(processed, DEFAULT_CONFIG)
 
@@ -23,7 +22,7 @@ class SyncTests(unittest.TestCase):
         self.assertGreater(region_end, DEFAULT_CONFIG.leading_silence_samples)
 
     def test_fine_scoring_prefers_correct_start_offset_over_nearby_incorrect_offsets(self) -> None:
-        processed = preprocess_audio(_transmission("HELLO"), DEFAULT_CONFIG.sample_rate_hz, DEFAULT_CONFIG)
+        processed = preprocess_audio(transmission("HELLO"), DEFAULT_CONFIG.sample_rate_hz, DEFAULT_CONFIG)
         correct_score = score_sync_candidate(
             processed,
             DEFAULT_CONFIG.leading_silence_samples,
@@ -40,7 +39,7 @@ class SyncTests(unittest.TestCase):
         self.assertGreater(correct_score, shifted_score)
 
     def test_fine_scoring_prefers_correct_samples_per_symbol_over_clearly_wrong_values(self) -> None:
-        processed = preprocess_audio(_transmission("HELLO"), DEFAULT_CONFIG.sample_rate_hz, DEFAULT_CONFIG)
+        processed = preprocess_audio(transmission("HELLO"), DEFAULT_CONFIG.sample_rate_hz, DEFAULT_CONFIG)
         correct_score = score_sync_candidate(
             processed,
             DEFAULT_CONFIG.leading_silence_samples,
@@ -60,7 +59,7 @@ class SyncTests(unittest.TestCase):
         padded = np.concatenate(
             (
                 np.zeros(DEFAULT_CONFIG.sync_hop_samples * 2, dtype=np.float64),
-                _transmission("HELLO"),
+                transmission("HELLO"),
                 np.zeros(DEFAULT_CONFIG.sync_hop_samples * 3, dtype=np.float64),
             )
         )
@@ -78,7 +77,7 @@ class SyncTests(unittest.TestCase):
         long_signal = np.concatenate(
             (
                 np.zeros(DEFAULT_CONFIG.sync_hop_samples * 2, dtype=np.float64),
-                _transmission("HELLO"),
+                transmission("HELLO"),
                 np.zeros(DEFAULT_CONFIG.sync_hop_samples * 20, dtype=np.float64),
             )
         )
@@ -87,12 +86,6 @@ class SyncTests(unittest.TestCase):
         candidates = find_sync_candidates(processed, DEFAULT_CONFIG)
 
         self.assertLessEqual(len(candidates), DEFAULT_CONFIG.sync_candidate_limit)
-
-
-def _transmission(text: str) -> np.ndarray:
-    frame_bits = bytes_to_bits(build_frame(validate_text(text)))
-    return synthesize_transmission(frame_bits, DEFAULT_CONFIG)
-
 
 if __name__ == "__main__":
     unittest.main()

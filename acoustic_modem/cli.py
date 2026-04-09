@@ -6,15 +6,15 @@ import sys
 
 from acoustic_modem.config import DEFAULT_CONFIG
 from acoustic_modem.framing import build_frame, bytes_to_bits, validate_text
-from acoustic_modem.rx import (
+from acoustic_modem.reporting import (
     decode_result_summary,
-    decode_wav,
     failure_reason,
     is_frame_validation_failure,
     is_invalid_input_failure,
     write_debug_artifacts,
     write_summary_json,
 )
+from acoustic_modem.rx import decode_wav
 from acoustic_modem.tx import synthesize_transmission, write_wav
 from acoustic_modem.types import DecodeResult, FailureCode, FramingError
 

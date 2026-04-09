@@ -28,6 +28,12 @@ class _ToneProjectionCache:
     f1_sin: np.ndarray
 
 
+@dataclass(frozen=True, slots=True)
+class _KnownPrefixPattern:
+    bits: np.ndarray
+    expected_signs: np.ndarray
+
+
 def find_leader_regions(samples: np.ndarray, cfg: ModemConfig = DEFAULT_CONFIG) -> list[tuple[int, int]]:
     sample_array = np.asarray(samples, dtype=np.float64)
     window_size = cfg.samples_per_symbol
@@ -76,39 +82,33 @@ def score_sync_candidate(
     cfg: ModemConfig = DEFAULT_CONFIG,
 ) -> float:
     sample_array = np.asarray(samples, dtype=np.float64)
-    if start_sample < 0 or samples_per_symbol <= 0:
-        return float("-inf")
-
-    known_bits = _known_prefix_bits(cfg)
-    total_known_samples = known_bits.size * samples_per_symbol
-    end_sample = start_sample + total_known_samples
-    if end_sample > sample_array.size:
-        return float("-inf")
-
+    pattern = _known_prefix_pattern(cfg)
     cache = _build_projection_cache(samples_per_symbol, cfg)
-    symbol_scores = np.empty(known_bits.size, dtype=np.float64)
-    for index in range(known_bits.size):
-        symbol_start = start_sample + (index * samples_per_symbol)
-        symbol_end = symbol_start + samples_per_symbol
-        symbol_scores[index], _ = _symbol_score(sample_array[symbol_start:symbol_end], cache)
-
-    expected_signs = np.where(known_bits == 1, 1.0, -1.0)
-    return float(np.mean(expected_signs * symbol_scores))
+    return _score_sync_candidate(sample_array, start_sample, samples_per_symbol, pattern, cache)
 
 
 def find_sync_candidates(samples: np.ndarray, cfg: ModemConfig = DEFAULT_CONFIG) -> list[SyncCandidate]:
     sample_array = np.asarray(samples, dtype=np.float64)
     accepted: dict[tuple[int, int], SyncCandidate] = {}
-
-    for region_start, region_end in find_leader_regions(sample_array, cfg):
-        for samples_per_symbol in range(
+    pattern = _known_prefix_pattern(cfg)
+    samples_per_symbol_values = list(
+        range(
             cfg.sync_min_samples_per_symbol,
             cfg.sync_max_samples_per_symbol + 1,
             cfg.sync_samples_per_symbol_step,
-        ):
+        )
+    )
+    projection_caches = {
+        samples_per_symbol: _build_projection_cache(samples_per_symbol, cfg)
+        for samples_per_symbol in samples_per_symbol_values
+    }
+
+    for region_start, region_end in find_leader_regions(sample_array, cfg):
+        for samples_per_symbol in samples_per_symbol_values:
+            cache = projection_caches[samples_per_symbol]
             for offset in range(-cfg.samples_per_symbol, cfg.samples_per_symbol + 1, _FINE_OFFSET_STEP_SAMPLES):
                 candidate_start = region_start + offset
-                match_score = score_sync_candidate(sample_array, candidate_start, samples_per_symbol, cfg)
+                match_score = _score_sync_candidate(sample_array, candidate_start, samples_per_symbol, pattern, cache)
                 if match_score < cfg.sync_match_threshold:
                     continue
 
@@ -128,8 +128,9 @@ def find_sync_candidates(samples: np.ndarray, cfg: ModemConfig = DEFAULT_CONFIG)
     return sorted_candidates[: cfg.sync_candidate_limit]
 
 
-def _known_prefix_bits(cfg: ModemConfig) -> np.ndarray:
-    return np.fromiter((1 if bit == "1" else 0 for bit in cfg.tx_prefix_bits), dtype=np.uint8)
+def _known_prefix_pattern(cfg: ModemConfig) -> _KnownPrefixPattern:
+    bits = np.fromiter((1 if bit == "1" else 0 for bit in cfg.tx_prefix_bits), dtype=np.uint8)
+    return _KnownPrefixPattern(bits=bits, expected_signs=np.where(bits == 1, 1.0, -1.0))
 
 
 def _estimate_noise_floor(total_energies: np.ndarray, cfg: ModemConfig) -> float:
@@ -163,6 +164,30 @@ def _build_projection_cache(
         f1_cos=window_array * np.cos(omega_1 * sample_offsets),
         f1_sin=window_array * np.sin(omega_1 * sample_offsets),
     )
+
+
+def _score_sync_candidate(
+    samples: np.ndarray,
+    start_sample: int,
+    samples_per_symbol: int,
+    pattern: _KnownPrefixPattern,
+    cache: _ToneProjectionCache,
+) -> float:
+    if start_sample < 0 or samples_per_symbol <= 0:
+        return float("-inf")
+
+    total_known_samples = pattern.bits.size * samples_per_symbol
+    end_sample = start_sample + total_known_samples
+    if end_sample > samples.size:
+        return float("-inf")
+
+    symbol_scores = np.empty(pattern.bits.size, dtype=np.float64)
+    for index in range(pattern.bits.size):
+        symbol_start = start_sample + (index * samples_per_symbol)
+        symbol_end = symbol_start + samples_per_symbol
+        symbol_scores[index], _ = _symbol_score(samples[symbol_start:symbol_end], cache)
+
+    return float(np.mean(pattern.expected_signs * symbol_scores))
 
 
 def _symbol_score(samples: np.ndarray, cache: _ToneProjectionCache) -> tuple[float, float]:

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
+from numpy.typing import ArrayLike
 
 from acoustic_modem.config import DEFAULT_CONFIG, ModemConfig
 from acoustic_modem.types import FailureCode, FrameFields, FramingError
@@ -109,7 +108,7 @@ def bytes_to_bits(data: bytes | bytearray | memoryview) -> np.ndarray:
     return np.unpackbits(byte_array, bitorder="big")
 
 
-def bits_to_bytes(bits: Any) -> bytes:
+def bits_to_bytes(bits: ArrayLike) -> bytes:
     bit_array = np.asarray(bits)
     if bit_array.ndim != 1:
         raise FramingError(FailureCode.INVALID_INPUT, "bits must be a one-dimensional array")
