@@ -33,6 +33,16 @@ class ModemConfig:
     clipping_abs_threshold: float = 0.98
     clipping_fraction_threshold: float = 0.01
     weak_symbol_confidence_threshold: float = 0.15
+    sync_analysis_hop_ms: float = 5.0
+    sync_noise_floor_percentile: float = 20.0
+    sync_leader_min_duration_ms: float = 300.0
+    sync_leader_score_threshold: float = 0.55
+    sync_leader_energy_threshold_multiplier: float = 5.0
+    sync_match_threshold: float = 0.65
+    sync_min_samples_per_symbol: int = 1900
+    sync_max_samples_per_symbol: int = 1940
+    sync_samples_per_symbol_step: int = 2
+    sync_backup_candidate_limit: int = 5
 
     @property
     def sync_word(self) -> int:
@@ -77,6 +87,18 @@ class ModemConfig:
     @property
     def silence_samples(self) -> int:
         return self.leading_silence_samples
+
+    @property
+    def sync_hop_samples(self) -> int:
+        return int(round(self.sample_rate_hz * (self.sync_analysis_hop_ms / 1_000.0)))
+
+    @property
+    def sync_leader_min_duration_samples(self) -> int:
+        return int(round(self.sample_rate_hz * (self.sync_leader_min_duration_ms / 1_000.0)))
+
+    @property
+    def sync_candidate_limit(self) -> int:
+        return self.sync_backup_candidate_limit + 1
 
 
 DEFAULT_CONFIG = ModemConfig()

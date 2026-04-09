@@ -17,7 +17,8 @@ from acoustic_modem.dsp import (
     tone_energies,
 )
 from acoustic_modem.framing import bits_to_bytes, parse_frame
-from acoustic_modem.types import DecodeResult, FailureCode, FramingError
+from acoustic_modem.sync import find_sync_candidates
+from acoustic_modem.types import DecodeResult, FailureCode, FramingError, SyncCandidate
 
 
 def preprocess_audio(samples: np.ndarray, sample_rate: int, cfg: ModemConfig = DEFAULT_CONFIG) -> np.ndarray:
@@ -41,6 +42,7 @@ def decode_wav(path: Path, cfg: ModemConfig = DEFAULT_CONFIG) -> DecodeResult:
             clipping_warning=False,
             sync_found=False,
             start_sample=None,
+            best_candidate_score=None,
         )
 
     mono_float = to_mono(pcm_to_float(raw_samples))
@@ -50,81 +52,97 @@ def decode_wav(path: Path, cfg: ModemConfig = DEFAULT_CONFIG) -> DecodeResult:
         fraction_threshold=cfg.clipping_fraction_threshold,
     )
     processed = preprocess_audio(raw_samples, sample_rate, cfg)
-    return _decode_clean_synthetic(processed, clipping_warning, cfg)
+    candidates = find_sync_candidates(processed, cfg)
+    if not candidates:
+        return _failure_result(
+            failure_code=FailureCode.SYNC_NOT_FOUND,
+            recovered_length=None,
+            weak_symbol_count=0,
+            clipping_warning=clipping_warning,
+            sync_found=False,
+            start_sample=None,
+            best_candidate_score=None,
+            samples_per_symbol=cfg.samples_per_symbol,
+        )
+
+    best_candidate_score = candidates[0].match_score
+    last_failure: DecodeResult | None = None
+    for candidate in candidates:
+        result = demodulate_from_sync(
+            processed,
+            candidate,
+            cfg=cfg,
+            clipping_warning=clipping_warning,
+            best_candidate_score=best_candidate_score,
+        )
+        if result.success:
+            return result
+        last_failure = result
+
+    return last_failure or _failure_result(
+        failure_code=FailureCode.SYNC_NOT_FOUND,
+        recovered_length=None,
+        weak_symbol_count=0,
+        clipping_warning=clipping_warning,
+        sync_found=False,
+        start_sample=None,
+        best_candidate_score=best_candidate_score,
+        samples_per_symbol=cfg.samples_per_symbol,
+    )
 
 
-def _decode_clean_synthetic(
-    processed_samples: np.ndarray,
-    clipping_warning: bool,
-    cfg: ModemConfig,
+def demodulate_from_sync(
+    samples: np.ndarray,
+    sync: SyncCandidate,
+    cfg: ModemConfig = DEFAULT_CONFIG,
+    clipping_warning: bool = False,
+    best_candidate_score: float | None = None,
 ) -> DecodeResult:
-    start_sample = cfg.leading_silence_samples
-    samples_per_symbol = cfg.samples_per_symbol
-    prefix_samples = cfg.tx_prefix_bit_count * samples_per_symbol
-    data_start = start_sample + prefix_samples
-    data_end = processed_samples.size - cfg.trailing_silence_samples
+    data_start = sync.start_sample + (cfg.tx_prefix_bit_count * sync.samples_per_symbol)
+    length_bits_result = _demodulate_bits(samples, data_start, 8, sync.samples_per_symbol, cfg)
+    if isinstance(length_bits_result, DecodeResult):
+        return _copy_result(length_bits_result, sync, clipping_warning, best_candidate_score)
 
-    if data_end <= data_start:
+    length_bits, weak_length_bits = length_bits_result
+    length_byte = bits_to_bytes(length_bits)[0]
+    if not cfg.min_payload_length <= length_byte <= cfg.max_payload_length:
         return _failure_result(
-            failure_code=FailureCode.TRUNCATED_FRAME,
-            recovered_length=None,
-            weak_symbol_count=0,
+            failure_code=FailureCode.INVALID_LENGTH,
+            recovered_length=length_byte,
+            weak_symbol_count=weak_length_bits,
             clipping_warning=clipping_warning,
             sync_found=True,
-            start_sample=start_sample,
-            cfg=cfg,
+            start_sample=sync.start_sample,
+            best_candidate_score=best_candidate_score,
+            samples_per_symbol=sync.samples_per_symbol,
         )
 
-    data_region = processed_samples[data_start:data_end]
-    if data_region.size % samples_per_symbol != 0:
-        return _failure_result(
-            failure_code=FailureCode.TRUNCATED_FRAME,
-            recovered_length=None,
-            weak_symbol_count=0,
-            clipping_warning=clipping_warning,
-            sync_found=True,
-            start_sample=start_sample,
-            cfg=cfg,
+    total_frame_bits = 8 + (8 * length_byte) + 16
+    frame_bits_result = _demodulate_bits(samples, data_start, total_frame_bits, sync.samples_per_symbol, cfg)
+    if isinstance(frame_bits_result, DecodeResult):
+        return _copy_result(
+            frame_bits_result,
+            sync,
+            clipping_warning,
+            best_candidate_score,
+            recovered_length=length_byte,
         )
 
-    symbol_count = data_region.size // samples_per_symbol
-    if symbol_count == 0:
-        return _failure_result(
-            failure_code=FailureCode.TRUNCATED_FRAME,
-            recovered_length=None,
-            weak_symbol_count=0,
-            clipping_warning=clipping_warning,
-            sync_found=True,
-            start_sample=start_sample,
-            cfg=cfg,
-        )
-
-    window = hann_window(samples_per_symbol)
-    bits = np.empty(symbol_count, dtype=np.uint8)
-    weak_symbol_count = 0
-
-    for index in range(symbol_count):
-        symbol = data_region[index * samples_per_symbol : (index + 1) * samples_per_symbol]
-        energy_0, energy_1 = tone_energies(symbol, cfg, window=window)
-        bits[index] = 1 if energy_1 > energy_0 else 0
-        confidence = abs(energy_1 - energy_0) / (energy_0 + energy_1 + 1e-12)
-        if confidence < cfg.weak_symbol_confidence_threshold:
-            weak_symbol_count += 1
-
-    frame_bytes = bits_to_bytes(bits)
-    recovered_length = frame_bytes[0] if frame_bytes else None
+    frame_bits, weak_symbol_count = frame_bits_result
+    frame_bytes = bits_to_bytes(frame_bits)
 
     try:
         parsed = parse_frame(frame_bytes, cfg)
     except FramingError as exc:
         return _failure_result(
             failure_code=exc.code,
-            recovered_length=recovered_length,
+            recovered_length=length_byte,
             weak_symbol_count=weak_symbol_count,
             clipping_warning=clipping_warning,
             sync_found=True,
-            start_sample=start_sample,
-            cfg=cfg,
+            start_sample=sync.start_sample,
+            best_candidate_score=best_candidate_score,
+            samples_per_symbol=sync.samples_per_symbol,
         )
 
     return DecodeResult(
@@ -133,10 +151,102 @@ def _decode_clean_synthetic(
         recovered_length=parsed.length,
         crc_ok=True,
         weak_symbol_count=weak_symbol_count,
-        samples_per_symbol=samples_per_symbol,
+        samples_per_symbol=sync.samples_per_symbol,
         clipping_warning=clipping_warning,
         sync_found=True,
-        start_sample=start_sample,
+        start_sample=sync.start_sample,
+        best_candidate_score=best_candidate_score,
+    )
+
+
+def _decode_clean_synthetic(
+    processed_samples: np.ndarray,
+    clipping_warning: bool,
+    cfg: ModemConfig,
+) -> DecodeResult:
+    candidate = SyncCandidate(
+        start_sample=cfg.leading_silence_samples,
+        samples_per_symbol=cfg.samples_per_symbol,
+        match_score=1.0,
+        coarse_region_start=cfg.leading_silence_samples,
+        coarse_region_end=cfg.leading_silence_samples + (cfg.tx_prefix_bit_count * cfg.samples_per_symbol),
+    )
+    return demodulate_from_sync(
+        processed_samples,
+        candidate,
+        cfg=cfg,
+        clipping_warning=clipping_warning,
+        best_candidate_score=candidate.match_score,
+    )
+
+
+def _demodulate_bits(
+    samples: np.ndarray,
+    data_start: int,
+    bit_count: int,
+    samples_per_symbol: int,
+    cfg: ModemConfig,
+) -> tuple[np.ndarray, int] | DecodeResult:
+    if data_start < 0:
+        return _failure_result(
+            failure_code=FailureCode.TRUNCATED_FRAME,
+            recovered_length=None,
+            weak_symbol_count=0,
+            clipping_warning=False,
+            sync_found=True,
+            start_sample=data_start,
+            best_candidate_score=None,
+            samples_per_symbol=samples_per_symbol,
+        )
+
+    total_data_samples = bit_count * samples_per_symbol
+    data_end = data_start + total_data_samples
+    if data_end > len(samples):
+        return _failure_result(
+            failure_code=FailureCode.TRUNCATED_FRAME,
+            recovered_length=None,
+            weak_symbol_count=0,
+            clipping_warning=False,
+            sync_found=True,
+            start_sample=data_start,
+            best_candidate_score=None,
+            samples_per_symbol=samples_per_symbol,
+        )
+
+    window = hann_window(samples_per_symbol)
+    bits = np.empty(bit_count, dtype=np.uint8)
+    weak_symbol_count = 0
+    for index in range(bit_count):
+        symbol_start = data_start + (index * samples_per_symbol)
+        symbol_end = symbol_start + samples_per_symbol
+        symbol = samples[symbol_start:symbol_end]
+        energy_0, energy_1 = tone_energies(symbol, cfg, window=window)
+        bits[index] = 1 if energy_1 > energy_0 else 0
+        confidence = abs(energy_1 - energy_0) / (energy_0 + energy_1 + 1e-12)
+        if confidence < cfg.weak_symbol_confidence_threshold:
+            weak_symbol_count += 1
+
+    return bits, weak_symbol_count
+
+
+def _copy_result(
+    result: DecodeResult,
+    sync: SyncCandidate,
+    clipping_warning: bool,
+    best_candidate_score: float | None,
+    recovered_length: int | None = None,
+) -> DecodeResult:
+    return DecodeResult(
+        decoded_text=result.decoded_text,
+        failure_code=result.failure_code,
+        recovered_length=recovered_length if recovered_length is not None else result.recovered_length,
+        crc_ok=result.crc_ok,
+        weak_symbol_count=result.weak_symbol_count,
+        samples_per_symbol=sync.samples_per_symbol,
+        clipping_warning=clipping_warning,
+        sync_found=True,
+        start_sample=sync.start_sample,
+        best_candidate_score=best_candidate_score,
     )
 
 
@@ -147,7 +257,8 @@ def _failure_result(
     clipping_warning: bool,
     sync_found: bool,
     start_sample: int | None,
-    cfg: ModemConfig,
+    best_candidate_score: float | None,
+    samples_per_symbol: int,
 ) -> DecodeResult:
     return DecodeResult(
         decoded_text=None,
@@ -155,8 +266,9 @@ def _failure_result(
         recovered_length=recovered_length,
         crc_ok=False,
         weak_symbol_count=weak_symbol_count,
-        samples_per_symbol=cfg.samples_per_symbol,
+        samples_per_symbol=samples_per_symbol,
         clipping_warning=clipping_warning,
         sync_found=sync_found,
         start_sample=start_sample,
+        best_candidate_score=best_candidate_score,
     )

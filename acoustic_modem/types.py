@@ -32,10 +32,20 @@ class DecodeResult:
     clipping_warning: bool
     sync_found: bool
     start_sample: int | None
+    best_candidate_score: float | None = None
 
     @property
     def success(self) -> bool:
         return self.failure_code is None and self.decoded_text is not None and self.crc_ok
+
+
+@dataclass(frozen=True, slots=True)
+class SyncCandidate:
+    start_sample: int
+    samples_per_symbol: int
+    match_score: float
+    coarse_region_start: int
+    coarse_region_end: int
 
 
 class FramingError(ValueError):

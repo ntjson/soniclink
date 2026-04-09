@@ -17,59 +17,109 @@ from acoustic_modem.types import FailureCode
 
 class SyntheticRoundtripTests(unittest.TestCase):
     def test_clean_synthetic_roundtrip_decodes_hello(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            wav_path = Path(temp_dir) / "hello.wav"
-            write_wav(wav_path, _hello_transmission(), DEFAULT_CONFIG.sample_rate_hz)
+        result = _decode_samples(_transmission("HELLO"))
 
-            result = decode_wav(wav_path, DEFAULT_CONFIG)
+        self.assertTrue(result.success)
+        self.assertEqual(result.decoded_text, "HELLO")
+        self.assertEqual(result.recovered_length, 5)
+        self.assertTrue(result.crc_ok)
+        self.assertEqual(result.samples_per_symbol, DEFAULT_CONFIG.samples_per_symbol)
+        self.assertFalse(result.clipping_warning)
+        self.assertTrue(result.sync_found)
+        self.assertIsNotNone(result.best_candidate_score)
 
-            self.assertTrue(result.success)
-            self.assertEqual(result.decoded_text, "HELLO")
-            self.assertEqual(result.recovered_length, 5)
-            self.assertTrue(result.crc_ok)
-            self.assertEqual(result.samples_per_symbol, DEFAULT_CONFIG.samples_per_symbol)
-            self.assertFalse(result.clipping_warning)
+    def test_hello_decodes_with_random_extra_leading_silence(self) -> None:
+        rng = np.random.default_rng(1234)
+        base = _transmission("HELLO")
 
-    def test_44100_hz_input_is_resampled_and_still_decodes(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            wav_path = Path(temp_dir) / "hello_44100.wav"
-            downsampled = resample_poly(_hello_transmission(), 147, 160)
-            write_wav(wav_path, downsampled, 44_100)
+        for extra_samples in rng.integers(0, (2 * DEFAULT_CONFIG.sample_rate_hz) + 1, size=5):
+            with self.subTest(extra_samples=int(extra_samples)):
+                padded = np.concatenate((np.zeros(int(extra_samples), dtype=np.float64), base))
+                result = _decode_samples(padded)
+                self.assertTrue(result.success)
+                self.assertEqual(result.decoded_text, "HELLO")
 
-            result = decode_wav(wav_path, DEFAULT_CONFIG)
+    def test_hello_decodes_with_random_extra_trailing_silence(self) -> None:
+        rng = np.random.default_rng(5678)
+        base = _transmission("HELLO")
 
-            self.assertTrue(result.success)
-            self.assertEqual(result.decoded_text, "HELLO")
+        for extra_samples in rng.integers(0, (2 * DEFAULT_CONFIG.sample_rate_hz) + 1, size=5):
+            with self.subTest(extra_samples=int(extra_samples)):
+                padded = np.concatenate((base, np.zeros(int(extra_samples), dtype=np.float64)))
+                result = _decode_samples(padded)
+                self.assertTrue(result.success)
+                self.assertEqual(result.decoded_text, "HELLO")
+
+    def test_hello_decodes_when_burst_is_shifted_from_nominal_start(self) -> None:
+        base = _transmission("HELLO")
+        early_shift = DEFAULT_CONFIG.samples_per_symbol // 2
+        shifted = np.concatenate((base[early_shift:], np.zeros(early_shift, dtype=np.float64)))
+
+        result = _decode_samples(shifted)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.decoded_text, "HELLO")
+        self.assertNotEqual(result.start_sample, DEFAULT_CONFIG.leading_silence_samples)
+
+    def test_resampled_44100_hz_input_still_decodes(self) -> None:
+        downsampled = resample_poly(_transmission("HELLO"), 147, 160)
+
+        result = _decode_samples(downsampled, sample_rate=44_100)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.decoded_text, "HELLO")
+
+    def test_48k_to_44k1_to_48k_resampling_still_decodes(self) -> None:
+        base = _transmission("HELLO")
+        downsampled = resample_poly(base, 147, 160)
+        restored = resample_poly(downsampled, 160, 147)
+
+        result = _decode_samples(restored)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.decoded_text, "HELLO")
 
     def test_stereo_input_is_converted_to_mono_and_still_decodes(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            wav_path = Path(temp_dir) / "hello_stereo.wav"
-            transmission = _hello_transmission()
-            stereo = np.column_stack((transmission, transmission))
-            wavfile.write(wav_path, DEFAULT_CONFIG.sample_rate_hz, _to_pcm16(stereo))
+        transmission = _transmission("HELLO")
+        stereo = np.column_stack((transmission, transmission))
 
-            result = decode_wav(wav_path, DEFAULT_CONFIG)
+        result = _decode_samples(stereo)
 
-            self.assertTrue(result.success)
-            self.assertEqual(result.decoded_text, "HELLO")
+        self.assertTrue(result.success)
+        self.assertEqual(result.decoded_text, "HELLO")
+
+    def test_additional_short_ascii_payloads_decode(self) -> None:
+        for payload in ("A", "OK", "TEST"):
+            with self.subTest(payload=payload):
+                result = _decode_samples(_transmission(payload))
+                self.assertTrue(result.success)
+                self.assertEqual(result.decoded_text, payload)
 
     def test_corrupted_clean_synthetic_wav_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            wav_path = Path(temp_dir) / "hello_corrupted.wav"
-            corrupted = _hello_transmission().copy()
-            _corrupt_last_crc_symbol(corrupted)
-            write_wav(wav_path, corrupted, DEFAULT_CONFIG.sample_rate_hz)
+        corrupted = _transmission("HELLO").copy()
+        _corrupt_last_crc_symbol(corrupted)
 
-            result = decode_wav(wav_path, DEFAULT_CONFIG)
+        result = _decode_samples(corrupted)
 
-            self.assertFalse(result.success)
-            self.assertIsNone(result.decoded_text)
-            self.assertEqual(result.failure_code, FailureCode.CRC_MISMATCH)
-            self.assertFalse(result.crc_ok)
+        self.assertFalse(result.success)
+        self.assertIsNone(result.decoded_text)
+        self.assertEqual(result.failure_code, FailureCode.CRC_MISMATCH)
+        self.assertFalse(result.crc_ok)
 
 
-def _hello_transmission() -> np.ndarray:
-    frame_bits = bytes_to_bits(build_frame(validate_text("HELLO")))
+def _decode_samples(samples: np.ndarray, sample_rate: int = DEFAULT_CONFIG.sample_rate_hz):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        wav_path = Path(temp_dir) / "roundtrip.wav"
+        sample_array = np.asarray(samples, dtype=np.float64)
+        if sample_array.ndim == 2:
+            wavfile.write(wav_path, sample_rate, _to_pcm16(sample_array))
+        else:
+            write_wav(wav_path, sample_array, sample_rate)
+        return decode_wav(wav_path, DEFAULT_CONFIG)
+
+
+def _transmission(text: str) -> np.ndarray:
+    frame_bits = bytes_to_bits(build_frame(validate_text(text)))
     return synthesize_transmission(frame_bits, DEFAULT_CONFIG)
 
 
