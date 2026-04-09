@@ -56,11 +56,14 @@ def bandpass_filter(samples: np.ndarray, sample_rate: int, low_hz: float, high_h
     if sample_array.size == 0:
         return sample_array.copy()
 
-    sos = butter(6, (low_hz, high_hz), btype="bandpass", fs=sample_rate, output="sos")
-    min_length_for_filtfilt = (3 * (2 * len(sos) + 1)) + 1
+    sos_array = np.asarray(
+        butter(6, (low_hz, high_hz), btype="bandpass", fs=sample_rate, output="sos"),
+        dtype=np.float64,
+    )
+    min_length_for_filtfilt = (3 * (2 * sos_array.shape[0] + 1)) + 1
     if sample_array.size < min_length_for_filtfilt:
         return sample_array.copy()
-    return sosfiltfilt(sos, sample_array)
+    return sosfiltfilt(sos_array, sample_array)
 
 
 def peak_normalize(samples: np.ndarray, target_peak: float) -> np.ndarray:
